@@ -122,6 +122,7 @@ import org.hypertrace.core.documentstore.query.Sort;
 import org.hypertrace.core.documentstore.query.SortingSpec;
 import org.hypertrace.core.documentstore.utils.Utils;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.extension.ExtensionContext;
@@ -4583,6 +4584,40 @@ public class DocStoreQueryV1Test {
         assertEquals(2, lteCount, "LTE: Should find 2 documents with pincode <= 400004");
       }
     }
+
+    /**
+     * This test validates that cols with hyphens ("-") are properly quoted so that PG doesn't
+     * interpret them as '-' operator
+     */
+    @ParameterizedTest
+    @ArgumentsSource(PostgresProvider.class)
+    void testFlatPostgresCollectionUnnestJsonbArrayWithHyphens(String dataStoreName) {
+      Datastore datastore = datastoreMap.get(dataStoreName);
+      Collection flatCollection =
+          datastore.getCollectionForType(FLAT_COLLECTION_NAME, DocumentType.FLAT);
+
+      // Unnest the hyphenated JSONB array field
+      Query unnestQuery =
+          Query.builder()
+              .addSelection(IdentifierExpression.of("item"))
+              .addSelection(
+                  JsonIdentifierExpression.of("props", JsonFieldType.STRING_ARRAY, "source-loc"))
+              .addFromClause(
+                  UnnestExpression.of(
+                      JsonIdentifierExpression.of(
+                          "props", JsonFieldType.STRING_ARRAY, "source-loc"),
+                      true))
+              .build();
+
+      // Execute query - should not throw syntax error
+      Iterator<Document> resultIterator = flatCollection.find(unnestQuery);
+
+      Set<String> foundLocations = new HashSet<>();
+      while (resultIterator.hasNext()) {
+        Document doc = resultIterator.next();
+        Assertions.assertNotNull(doc);
+      }
+    }
   }
 
   @Nested
@@ -4773,6 +4808,67 @@ public class DocStoreQueryV1Test {
       assertTrue(count > 0, "Should return at least some documents");
       assertTrue(
           returnedItems.contains("Comb"), "Should include Comb (has empty colors array in props)");
+    }
+
+    // This test returns all docs that have props->product-code field present (regardless if the
+    // value is NULL/non-null)
+    @ParameterizedTest
+    @ArgumentsSource(PostgresProvider.class)
+    void testExistsFilterOnJsonScalars(String dataStoreName) {
+      Datastore datastore = datastoreMap.get(dataStoreName);
+      Collection flatCollection =
+          datastore.getCollectionForType(FLAT_COLLECTION_NAME, DocumentType.FLAT);
+
+      Query query =
+          Query.builder()
+              .addSelection(IdentifierExpression.of("item"))
+              .addSelection(
+                  JsonIdentifierExpression.of("props", JsonFieldType.STRING, "product-code"))
+              .setFilter(
+                  RelationalExpression.of(
+                      JsonIdentifierExpression.of("props", JsonFieldType.STRING, "product-code"),
+                      EXISTS,
+                      ConstantExpression.of("null")))
+              .build();
+
+      Iterator<Document> results = flatCollection.find(query);
+
+      int count = 0;
+      while (results.hasNext()) {
+        Document next = results.next();
+        count++;
+      }
+      assertEquals(4, count, "Should return exactly 4 documents with non-empty product-code");
+    }
+
+    // This test returns all docs that have props->product-code field missing
+    @ParameterizedTest
+    @ArgumentsSource(PostgresProvider.class)
+    void testNotExistsFilterOnJsonScalars(String dataStoreName) {
+      Datastore datastore = datastoreMap.get(dataStoreName);
+      Collection flatCollection =
+          datastore.getCollectionForType(FLAT_COLLECTION_NAME, DocumentType.FLAT);
+
+      Query query =
+          Query.builder()
+              .addSelection(IdentifierExpression.of("item"))
+              .addSelection(
+                  JsonIdentifierExpression.of("props", JsonFieldType.STRING, "product-code"))
+              .setFilter(
+                  RelationalExpression.of(
+                      JsonIdentifierExpression.of("props", JsonFieldType.STRING, "product-code"),
+                      NOT_EXISTS,
+                      ConstantExpression.of("null")))
+              .build();
+
+      Iterator<Document> results = flatCollection.find(query);
+
+      int count = 0;
+      while (results.hasNext()) {
+        Document next = results.next();
+        count++;
+      }
+      assertEquals(6, count, "Should return exactly 6 documents with missing product-code");
     }
   }
 

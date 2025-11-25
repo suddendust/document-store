@@ -49,20 +49,8 @@ class PostgresExistsRelationalFilterParser implements PostgresRelationalFilterPa
         }
 
       case JSONB_SCALAR:
-        {
-          // JSONB scalar fields - use ? operator for GIN index optimization
-          JsonIdentifierExpression jsonExpr = (JsonIdentifierExpression) expression.getLhs();
-          String baseColumn = wrapWithDoubleQuotes(jsonExpr.getColumnName());
-          String nestedPath = String.join(".", jsonExpr.getJsonPath());
-
-          return parsedRhs
-              ? String.format("%s ? '%s'", baseColumn, nestedPath)
-              : String.format("NOT (%s ? '%s')", baseColumn, nestedPath);
-        }
-
       case SCALAR:
       default:
-        // Regular scalar fields - use standard NULL checks
         return parsedRhs
             ? String.format("%s IS NOT NULL", parsedLhs)
             : String.format("%s IS NULL", parsedLhs);
