@@ -36,9 +36,7 @@ class PostgresNotExistsRelationalFilterParser implements PostgresRelationalFilte
           if (context.getPgColumnNames().containsKey(arrayFieldName)) {
             // Field is unnested - each element is now a scalar, not an array
             // Use simple NULL checks instead of cardinality
-            return parsedRhs
-                ? String.format("%s IS NOT NULL", parsedLhs)
-                : String.format("%s IS NULL", parsedLhs);
+            return getScalarExpr(parsedRhs, parsedLhs);
           }
 
           // Field is NOT unnested - apply cardinality logic
@@ -59,9 +57,7 @@ class PostgresNotExistsRelationalFilterParser implements PostgresRelationalFilte
           if (context.getPgColumnNames().containsKey(fieldName)) {
             // Field is unnested - each element is now a scalar, not an array
             // Use simple NULL checks instead of array length
-            return parsedRhs
-                ? String.format("%s IS NOT NULL", parsedLhs)
-                : String.format("%s IS NULL", parsedLhs);
+            return getScalarExpr(parsedRhs, parsedLhs);
           }
 
           // Field is NOT unnested - apply array length logic
@@ -79,10 +75,14 @@ class PostgresNotExistsRelationalFilterParser implements PostgresRelationalFilte
       case JSONB_SCALAR:
       case SCALAR:
       default:
-        return parsedRhs
-            ? String.format("%s IS NOT NULL", parsedLhs)
-            : String.format("%s IS NULL", parsedLhs);
+        return getScalarExpr(parsedRhs, parsedLhs);
     }
+  }
+
+  private static String getScalarExpr(boolean parsedRhs, String parsedLhs) {
+    return parsedRhs
+        ? String.format("%s IS NOT NULL", parsedLhs)
+        : String.format("%s IS NULL", parsedLhs);
   }
 
   private String wrapWithDoubleQuotes(String identifier) {

@@ -4811,8 +4811,6 @@ public class DocStoreQueryV1Test {
           returnedItems.contains("Comb"), "Should include Comb (has empty colors array in props)");
     }
 
-    // This test returns all docs that have props->product-code field present (regardless if the
-    // value is NULL/non-null)
     @ParameterizedTest
     @ArgumentsSource(PostgresProvider.class)
     void testExistsFilterOnJsonScalars(String dataStoreName) {
@@ -4839,10 +4837,10 @@ public class DocStoreQueryV1Test {
         Document next = results.next();
         count++;
       }
+      // We have 4 rows with "props"->'product-code' field present (regardless of the value)
       assertEquals(4, count, "Should return exactly 4 documents with non-empty product-code");
     }
 
-    // This test returns all docs that have props->product-code field missing
     @ParameterizedTest
     @ArgumentsSource(PostgresProvider.class)
     void testNotExistsFilterOnJsonScalars(String dataStoreName) {
@@ -4869,6 +4867,7 @@ public class DocStoreQueryV1Test {
         Document next = results.next();
         count++;
       }
+      // We have 6 rows that have "props"->'product-code' field missing
       assertEquals(6, count, "Should return exactly 6 documents with missing product-code");
     }
 
