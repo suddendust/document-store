@@ -1,5 +1,6 @@
 package org.hypertrace.core.documentstore.postgres.query.v1.parser.filter;
 
+import org.hypertrace.core.documentstore.expression.impl.ArrayIdentifierExpression;
 import org.hypertrace.core.documentstore.expression.impl.ConstantExpression;
 import org.hypertrace.core.documentstore.expression.impl.JsonIdentifierExpression;
 import org.hypertrace.core.documentstore.expression.impl.RelationalExpression;
@@ -25,16 +26,42 @@ class PostgresExistsRelationalFilterParser implements PostgresRelationalFilterPa
 
     switch (category) {
       case ARRAY:
-        // First-class PostgreSQL array columns (text[], int[], etc.)
-        return parsedRhs
-            // We don't need to check that LHS is NOT NULL because WHERE cardinality(NULL) will not
-            // be included in the result set
-            ? String.format("(cardinality(%s) > 0)", parsedLhs)
-            : String.format("COALESCE(cardinality(%s), 0) = 0", parsedLhs);
+        {
+          // First-class PostgreSQL array columns (text[], int[], etc.)
+          // Check if this field has been unnested - if so, treat it as a scalar
+          ArrayIdentifierExpression arrayExpr = (ArrayIdentifierExpression) expression.getLhs();
+          String arrayFieldName = arrayExpr.getName();
+          if (context.getPgColumnNames().containsKey(arrayFieldName)) {
+            // Field is unnested - each element is now a scalar, not an array
+            // Use simple NULL checks instead of cardinality
+            return parsedRhs
+                ? String.format("%s IS NOT NULL", parsedLhs)
+                : String.format("%s IS NULL", parsedLhs);
+          }
+
+          // Field is NOT unnested - apply cardinality logic
+          return parsedRhs
+              // We don't need to check that LHS is NOT NULL because WHERE cardinality(NULL) will
+              // not
+              // be included in the result set
+              ? String.format("(cardinality(%s) > 0)", parsedLhs)
+              : String.format("COALESCE(cardinality(%s), 0) = 0", parsedLhs);
+        }
 
       case JSONB_ARRAY:
         {
           JsonIdentifierExpression jsonExpr = (JsonIdentifierExpression) expression.getLhs();
+          // Check if this field has been unnested - if so, treat it as a scalar
+          String fieldName = jsonExpr.getName();
+          if (context.getPgColumnNames().containsKey(fieldName)) {
+            // Field is unnested - each element is now a scalar, not an array
+            // Use simple NULL checks instead of array length
+            return parsedRhs
+                ? String.format("%s IS NOT NULL", parsedLhs)
+                : String.format("%s IS NULL", parsedLhs);
+          }
+
+          // Field is NOT unnested - apply array length logic
           String baseColumn = wrapWithDoubleQuotes(jsonExpr.getColumnName());
           String nestedPath = String.join(".", jsonExpr.getJsonPath());
           return parsedRhs

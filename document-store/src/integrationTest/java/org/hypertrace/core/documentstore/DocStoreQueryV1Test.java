@@ -90,6 +90,7 @@ import org.hypertrace.core.documentstore.expression.impl.AggregateExpression;
 import org.hypertrace.core.documentstore.expression.impl.AliasedIdentifierExpression;
 import org.hypertrace.core.documentstore.expression.impl.ArrayIdentifierExpression;
 import org.hypertrace.core.documentstore.expression.impl.ArrayRelationalFilterExpression;
+import org.hypertrace.core.documentstore.expression.impl.ArrayType;
 import org.hypertrace.core.documentstore.expression.impl.ConstantExpression;
 import org.hypertrace.core.documentstore.expression.impl.FunctionExpression;
 import org.hypertrace.core.documentstore.expression.impl.IdentifierExpression;
@@ -4869,6 +4870,149 @@ public class DocStoreQueryV1Test {
         count++;
       }
       assertEquals(6, count, "Should return exactly 6 documents with missing product-code");
+    }
+
+    @ParameterizedTest
+    @ArgumentsSource(PostgresProvider.class)
+    void testExistsFilterOnUnnestedNativeArray(String dataStoreName) {
+      Datastore datastore = datastoreMap.get(dataStoreName);
+      Collection flatCollection =
+          datastore.getCollectionForType(FLAT_COLLECTION_NAME, DocumentType.FLAT);
+
+      Query unnestQuery =
+          Query.builder()
+              .addSelection(IdentifierExpression.of("item"))
+              .addSelection(ArrayIdentifierExpression.of("tags"))
+              .addFromClause(
+                  UnnestExpression.of(ArrayIdentifierExpression.of("tags", ArrayType.TEXT), true))
+              // Only include tags[] that have at least 1 element, all rows with NULL or empty tags
+              // should be excluded.
+              .setFilter(
+                  RelationalExpression.of(
+                      ArrayIdentifierExpression.of("tags", ArrayType.TEXT),
+                      EXISTS,
+                      ConstantExpression.of("null")))
+              .build();
+
+      Iterator<Document> results = flatCollection.find(unnestQuery);
+
+      int count = 0;
+      while (results.hasNext()) {
+        Document doc = results.next();
+        Assertions.assertNotNull(doc);
+        count++;
+      }
+
+      assertEquals(25, count, "Should return unnested tag elements from non-empty arrays");
+    }
+
+    @ParameterizedTest
+    @ArgumentsSource(PostgresProvider.class)
+    void testNotExistsFilterOnUnnestNativeArray(String dataStoreName) {
+      Datastore datastore = datastoreMap.get(dataStoreName);
+      Collection flatCollection =
+          datastore.getCollectionForType(FLAT_COLLECTION_NAME, DocumentType.FLAT);
+
+      Query unnestQuery =
+          Query.builder()
+              .addSelection(IdentifierExpression.of("item"))
+              .addSelection(ArrayIdentifierExpression.of("tags"))
+              .addFromClause(
+                  UnnestExpression.of(ArrayIdentifierExpression.of("tags", ArrayType.TEXT), true))
+              // Only include tags[] that are either NULL or empty (we have one row with NULL tag
+              // and one with empty tag. Unnest will result in two rows with NULL for
+              // "tags_unnested"). Note that this behavior will change with
+              // preserveNulLAndEmptyArrays = false. This is because unnest won't preserve those
+              // rows for which the unnested column is NULL then.
+              .setFilter(
+                  RelationalExpression.of(
+                      ArrayIdentifierExpression.of("tags", ArrayType.TEXT),
+                      NOT_EXISTS,
+                      ConstantExpression.of("null")))
+              .build();
+
+      Iterator<Document> results = flatCollection.find(unnestQuery);
+
+      int count = 0;
+      while (results.hasNext()) {
+        Document doc = results.next();
+        Assertions.assertNotNull(doc);
+        count++;
+      }
+
+      assertEquals(2, count, "Should return at least 2 rows with NULL unnested tags");
+    }
+
+    @ParameterizedTest
+    @ArgumentsSource(PostgresProvider.class)
+    void testExistsFilterOnUnnestJsonbArray(String dataStoreName) {
+      Datastore datastore = datastoreMap.get(dataStoreName);
+      Collection flatCollection =
+          datastore.getCollectionForType(FLAT_COLLECTION_NAME, DocumentType.FLAT);
+
+      Query unnestQuery =
+          Query.builder()
+              .addSelection(IdentifierExpression.of("item"))
+              .addFromClause(
+                  UnnestExpression.of(
+                      JsonIdentifierExpression.of(
+                          "props", JsonFieldType.STRING_ARRAY, "source-loc"),
+                      true))
+              // Should include only those props->source_loc arrays that have at least one element.
+              // So essentially, after unnesting this array, we don't have any rows with NULL for
+              // the unnested col
+              .setFilter(
+                  RelationalExpression.of(
+                      JsonIdentifierExpression.of(
+                          "props", JsonFieldType.STRING_ARRAY, "source-loc"),
+                      EXISTS,
+                      ConstantExpression.of("null")))
+              .build();
+
+      Iterator<Document> resultIterator = flatCollection.find(unnestQuery);
+
+      int count = 0;
+      while (resultIterator.hasNext()) {
+        Document doc = resultIterator.next();
+        Assertions.assertNotNull(doc);
+        count++;
+      }
+      assertEquals(6, count);
+    }
+
+    @ParameterizedTest
+    @ArgumentsSource(PostgresProvider.class)
+    void testNotExistsFilterOnUnnestJsonbArray(String dataStoreName) {
+      Datastore datastore = datastoreMap.get(dataStoreName);
+      Collection flatCollection =
+          datastore.getCollectionForType(FLAT_COLLECTION_NAME, DocumentType.FLAT);
+
+      Query unnestQuery =
+          Query.builder()
+              .addSelection(IdentifierExpression.of("item"))
+              .addFromClause(
+                  UnnestExpression.of(
+                      JsonIdentifierExpression.of(
+                          "props", JsonFieldType.STRING_ARRAY, "source-loc"),
+                      true))
+              // Should include only those props->source_loc arrays that are either NULL or empty.
+              .setFilter(
+                  RelationalExpression.of(
+                      JsonIdentifierExpression.of(
+                          "props", JsonFieldType.STRING_ARRAY, "source-loc"),
+                      NOT_EXISTS,
+                      ConstantExpression.of("null")))
+              .build();
+
+      Iterator<Document> resultIterator = flatCollection.find(unnestQuery);
+
+      int count = 0;
+      while (resultIterator.hasNext()) {
+        Document doc = resultIterator.next();
+        Assertions.assertNotNull(doc);
+        count++;
+      }
+      assertEquals(7, count);
     }
   }
 
