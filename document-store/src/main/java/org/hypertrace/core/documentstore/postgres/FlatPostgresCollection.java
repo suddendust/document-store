@@ -591,8 +591,8 @@ public class FlatPostgresCollection extends PostgresCollection {
    * <p>Generates: INSERT ... ON CONFLICT DO UPDATE SET col = EXCLUDED.col for each column. Only
    * columns in the provided list are updated on conflict (merge behavior).
    *
-   * @param columns          List of quoted column names to include
-   * @param pkColumn         The quoted primary key column name
+   * @param columns List of quoted column names to include
+   * @param pkColumn The quoted primary key column name
    * @param includeReturning If true, adds RETURNING clause to detect insert vs update
    * @return The upsert SQL statement
    */
@@ -607,11 +607,11 @@ public class FlatPostgresCollection extends PostgresCollection {
    * <p>Generates: INSERT ... ON CONFLICT DO UPDATE SET col = EXCLUDED.col for each column. Only
    * columns in the provided list are updated on conflict (merge behavior).
    *
-   * @param columns          List of quoted column names to include
-   * @param pkColumn         The quoted primary key column name
+   * @param columns List of quoted column names to include
+   * @param pkColumn The quoted primary key column name
    * @param includeReturning If true, adds RETURNING clause to detect insert vs update
-   * @param useCoalesce      If true, uses COALESCE(EXCLUDED.col, table.col) to preserve existing
-   *                         values when the new value is NULL
+   * @param useCoalesce If true, uses COALESCE(EXCLUDED.col, table.col) to preserve existing values
+   *     when the new value is NULL
    * @return The upsert SQL statement
    */
   private String buildMergeUpsertSql(
@@ -922,23 +922,22 @@ public class FlatPostgresCollection extends PostgresCollection {
     String tableName = tableIdentifier.getTableName();
     String quotedPkColumn = PostgresUtils.wrapFieldNamesWithDoubleQuotes(getPKForTable(tableName));
 
-    // Phase 1: group entries by update structure (paths + operators) — determines SQL template
-    Map<String, List<Map.Entry<Key, Collection<SubDocumentUpdate>>>> bySignature =
-        new LinkedHashMap<>();
-    for (Map.Entry<Key, Collection<SubDocumentUpdate>> entry : updates.entrySet()) {
+    // Group by update structure (path + operator) — keys with the same structure share one SQL
+    // template and are executed as a single JDBC batch, reducing N round-trips to 1 per group.
+    Map<String, Map<Key, Collection<SubDocumentUpdate>>> bySignature = new LinkedHashMap<>();
+    for (Entry<Key, Collection<SubDocumentUpdate>> entry : updates.entrySet()) {
       Collection<SubDocumentUpdate> keyUpdates = entry.getValue();
       if (keyUpdates == null || keyUpdates.isEmpty()) {
         continue;
       }
       bySignature
-          .computeIfAbsent(toUpdateSignature(keyUpdates), k -> new ArrayList<>())
-          .add(entry);
+          .computeIfAbsent(toUpdateSignature(keyUpdates), k -> new LinkedHashMap<>())
+          .put(entry.getKey(), keyUpdates);
     }
 
-    // Phase 2: for each group, build SQL once and batch-execute all keys
     int totalUpdated = 0;
     try (Connection connection = client.getPooledConnection()) {
-      for (List<Map.Entry<Key, Collection<SubDocumentUpdate>>> group : bySignature.values()) {
+      for (Map<Key, Collection<SubDocumentUpdate>> group : bySignature.values()) {
         try {
           totalUpdated += executeBatchForGroup(connection, group, tableName, quotedPkColumn);
         } catch (Exception e) {
@@ -960,22 +959,21 @@ public class FlatPostgresCollection extends PostgresCollection {
 
   private int executeBatchForGroup(
       Connection connection,
-      List<Map.Entry<Key, Collection<SubDocumentUpdate>>> group,
+      Map<Key, Collection<SubDocumentUpdate>> group,
       String tableName,
       String quotedPkColumn)
       throws IOException, SQLException {
 
     // Validate and resolve columns once — all entries share the same structure
-    Collection<SubDocumentUpdate> firstUpdates = group.get(0).getValue();
+    Collection<SubDocumentUpdate> firstUpdates = group.values().iterator().next();
     updateValidator.validate(firstUpdates);
     Map<String, String> resolvedColumns = resolvePathsToColumns(firstUpdates, tableName);
 
-    // Build SET clause SQL fragments from the first entry
+    // Step 1: Build the SQL template from the first entry's structure (params discarded)
     List<String> setFragments = new ArrayList<>();
-    List<Object> firstParams = new ArrayList<>();
     boolean hasUpdates =
         buildSetClauseFragments(
-            connection, firstUpdates, tableName, resolvedColumns, setFragments, firstParams);
+            connection, firstUpdates, tableName, resolvedColumns, setFragments, new ArrayList<>());
 
     if (!hasUpdates) {
       return 0;
@@ -992,12 +990,10 @@ public class FlatPostgresCollection extends PostgresCollection {
 
     LOGGER.debug("Executing batched key update SQL: {} (batch size: {})", sql, group.size());
 
+    // Step 2: Bind params for every entry uniformly (including the first)
     int updatedCount = 0;
     try (PreparedStatement ps = connection.prepareStatement(sql)) {
-      bindBatchParams(ps, firstParams, group.get(0).getKey());
-
-      for (int i = 1; i < group.size(); i++) {
-        Map.Entry<Key, Collection<SubDocumentUpdate>> entry = group.get(i);
+      for (Entry<Key, Collection<SubDocumentUpdate>> entry : group.entrySet()) {
         List<Object> params = new ArrayList<>();
         try {
           buildSetClauseFragments(
@@ -1015,7 +1011,7 @@ public class FlatPostgresCollection extends PostgresCollection {
         }
       }
     } catch (BatchUpdateException e) {
-      LOGGER.warn("Batch update partially failed", e);
+      LOGGER.error("Batch update partially failed", e);
       for (int r : e.getUpdateCounts()) {
         if (r > 0 || r == Statement.SUCCESS_NO_INFO) {
           updatedCount++;
@@ -1043,7 +1039,7 @@ public class FlatPostgresCollection extends PostgresCollection {
    * Validates all updates and resolves column names.
    *
    * @return Map of path -> columnName for all resolved columns. For example: customAttributes.props
-   * -> customAttributes (since customAttributes is the top-level JSONB col)
+   *     -> customAttributes (since customAttributes is the top-level JSONB col)
    */
   private Map<String, String> resolvePathsToColumns(
       Collection<SubDocumentUpdate> updates, String tableName) {
@@ -1116,9 +1112,7 @@ public class FlatPostgresCollection extends PostgresCollection {
     return Optional.empty();
   }
 
-  /**
-   * Extracts the nested JSONB path from a full path given the resolved column name.
-   */
+  /** Extracts the nested JSONB path from a full path given the resolved column name. */
   private String[] getNestedPath(String fullPath, String columnName) {
     if (fullPath.equals(columnName)) {
       return new String[0];
@@ -1523,9 +1517,9 @@ public class FlatPostgresCollection extends PostgresCollection {
    * <p>Unlike {@link #createOrReplaceWithRetry}, this method does NOT reset missing columns to
    * their default values.
    *
-   * @param key      The document key
+   * @param key The document key
    * @param document The document to upsert
-   * @param isRetry  Whether this is a retry attempt after schema refresh
+   * @param isRetry Whether this is a retry attempt after schema refresh
    * @return true if a new document was created, false if an existing document was updated
    */
   private boolean upsertWithRetry(Key key, Document document, boolean isRetry) throws IOException {
@@ -1577,7 +1571,7 @@ public class FlatPostgresCollection extends PostgresCollection {
    * }</pre>
    *
    * @param docColumns columns present in the document
-   * @param pkColumn   The quoted primary key column name used for conflict detection
+   * @param pkColumn The quoted primary key column name used for conflict detection
    * @return The complete upsert SQL statement with placeholders for values
    */
   private String buildUpsertSql(List<String> docColumns, String pkColumn) {
@@ -1620,8 +1614,8 @@ public class FlatPostgresCollection extends PostgresCollection {
    * </ul>
    *
    * @param allTableColumns all cols present in the table
-   * @param docColumns      cols present in the document
-   * @param pkColumn        The quoted primary key column name used for conflict detection
+   * @param docColumns cols present in the document
+   * @param pkColumn The quoted primary key column name used for conflict detection
    * @return The complete upsert SQL statement with placeholders for values
    */
   private String buildCreateOrReplaceSql(
@@ -1676,9 +1670,7 @@ public class FlatPostgresCollection extends PostgresCollection {
     }
   }
 
-  /**
-   * Returns true if INSERT, false if UPDATE.
-   */
+  /** Returns true if INSERT, false if UPDATE. */
   private boolean executeUpsertReturningIsInsert(String sql, TypedDocument parsed)
       throws SQLException {
     try (Connection conn = client.getPooledConnection();

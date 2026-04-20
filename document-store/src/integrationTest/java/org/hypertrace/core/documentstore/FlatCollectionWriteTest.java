@@ -191,6 +191,7 @@ public class FlatCollectionWriteTest extends BaseWriteTest {
 
   @Nested
   class BulkUpsertTests {
+
     @Test
     @DisplayName("Should bulk upsert multiple new documents")
     void testBulkUpsertNewDocuments() throws Exception {
@@ -1442,6 +1443,7 @@ public class FlatCollectionWriteTest extends BaseWriteTest {
 
     @Nested
     class BulkCreateOrReplaceTests {
+
       @Test
       @DisplayName("Should bulk createOrReplace multiple new documents")
       void testBulkCreateOrReplaceNewDocuments() throws Exception {
@@ -3408,95 +3410,117 @@ public class FlatCollectionWriteTest extends BaseWriteTest {
   class KeySpecificBulkUpdateTests {
 
     @Test
-    @DisplayName("Should update multiple keys with all operator types in a single batch")
-    void testBulkUpdateAllOperatorTypes() throws Exception {
+    @DisplayName(
+        "Should batch keys with the same (path, operator) signature into a single SQL execution")
+    void testBulkUpdateGroupsBySignature() throws Exception {
+
       Map<Key, java.util.Collection<SubDocumentUpdate>> updates = new LinkedHashMap<>();
+
+      // Group A: SET item — 3 keys
+      updates.put(rawKey("1"), List.of(SubDocumentUpdate.of("item", "RenamedSoap")));
+      updates.put(rawKey("2"), List.of(SubDocumentUpdate.of("item", "RenamedMirror")));
+      updates.put(rawKey("3"), List.of(SubDocumentUpdate.of("item", "RenamedShampoo")));
+
+      // Group B: ADD price — 3 keys (key "4" price=5, "5" price=20, "6" price=7.5)
       updates.put(
-          rawKey("1"),
+          rawKey("4"),
           List.of(
-              SubDocumentUpdate.of("item", "UpdatedSoap"),
               SubDocumentUpdate.builder()
                   .subDocument("price")
                   .operator(UpdateOperator.ADD)
-                  .subDocumentValue(SubDocumentValue.of(5))
-                  .build(),
-              SubDocumentUpdate.builder()
-                  .subDocument("props.brand")
-                  .operator(UpdateOperator.SET)
-                  .subDocumentValue(SubDocumentValue.of("NewBrand"))
+                  .subDocumentValue(SubDocumentValue.of(10))
                   .build()));
-
-      updates.put(
-          rawKey("3"),
-          List.of(
-              SubDocumentUpdate.builder()
-                  .subDocument("props.brand")
-                  .operator(UpdateOperator.UNSET)
-                  .build(),
-              SubDocumentUpdate.builder()
-                  .subDocument("tags")
-                  .operator(UpdateOperator.APPEND_TO_LIST)
-                  .subDocumentValue(SubDocumentValue.of(new String[] {"newTag1", "newTag2"}))
-                  .build()));
-
       updates.put(
           rawKey("5"),
           List.of(
               SubDocumentUpdate.builder()
-                  .subDocument("tags")
-                  .operator(UpdateOperator.ADD_TO_LIST_IF_ABSENT)
-                  .subDocumentValue(SubDocumentValue.of(new String[] {"hygiene", "uniqueTag"}))
+                  .subDocument("price")
+                  .operator(UpdateOperator.ADD)
+                  .subDocumentValue(SubDocumentValue.of(5))
                   .build()));
-
       updates.put(
           rawKey("6"),
           List.of(
               SubDocumentUpdate.builder()
+                  .subDocument("price")
+                  .operator(UpdateOperator.ADD)
+                  .subDocumentValue(SubDocumentValue.of(2))
+                  .build()));
+
+      // Group C: APPEND_TO_LIST tags — 2 keys
+      updates.put(
+          rawKey("7"),
+          List.of(
+              SubDocumentUpdate.builder()
                   .subDocument("tags")
-                  .operator(UpdateOperator.REMOVE_ALL_FROM_LIST)
-                  .subDocumentValue(SubDocumentValue.of(new String[] {"plastic"}))
+                  .operator(UpdateOperator.APPEND_TO_LIST)
+                  .subDocumentValue(SubDocumentValue.of(new String[] {"newTag7"}))
+                  .build()));
+      updates.put(
+          rawKey("8"),
+          List.of(
+              SubDocumentUpdate.builder()
+                  .subDocument("tags")
+                  .operator(UpdateOperator.APPEND_TO_LIST)
+                  .subDocumentValue(SubDocumentValue.of(new String[] {"newTag8"}))
                   .build()));
 
       BulkUpdateResult result = flatCollection.bulkUpdate(updates, UpdateOptions.builder().build());
 
-      assertEquals(4, result.getUpdatedCount());
+      assertEquals(8, result.getUpdatedCount());
 
+      // Group A: verify each key got its own value (not overwritten by another key's value)
       try (CloseableIterator<Document> iter = flatCollection.find(queryById("1"))) {
         assertTrue(iter.hasNext());
-        JsonNode json = OBJECT_MAPPER.readTree(iter.next().toJson());
-        assertEquals("UpdatedSoap", json.get("item").asText());
-        assertEquals(15, json.get("price").asInt()); // 10 + 5
-        assertEquals("NewBrand", json.get("props").get("brand").asText());
-        assertEquals("M", json.get("props").get("size").asText()); // preserved
+        assertEquals(
+            "RenamedSoap", OBJECT_MAPPER.readTree(iter.next().toJson()).get("item").asText());
       }
-
+      try (CloseableIterator<Document> iter = flatCollection.find(queryById("2"))) {
+        assertTrue(iter.hasNext());
+        assertEquals(
+            "RenamedMirror", OBJECT_MAPPER.readTree(iter.next().toJson()).get("item").asText());
+      }
       try (CloseableIterator<Document> iter = flatCollection.find(queryById("3"))) {
         assertTrue(iter.hasNext());
-        JsonNode json = OBJECT_MAPPER.readTree(iter.next().toJson());
-        assertFalse(json.get("props").has("brand"));
-        assertEquals("L", json.get("props").get("size").asText()); // preserved
-        JsonNode tagsNode = json.get("tags");
-        assertEquals(6, tagsNode.size()); // Original 4 + 2 new
+        assertEquals(
+            "RenamedShampoo", OBJECT_MAPPER.readTree(iter.next().toJson()).get("item").asText());
       }
 
+      // Group B: verify each key's price was incremented by its own delta
+      try (CloseableIterator<Document> iter = flatCollection.find(queryById("4"))) {
+        assertTrue(iter.hasNext());
+        assertEquals(
+            15, OBJECT_MAPPER.readTree(iter.next().toJson()).get("price").asInt()); // 5 + 10
+      }
       try (CloseableIterator<Document> iter = flatCollection.find(queryById("5"))) {
         assertTrue(iter.hasNext());
-        JsonNode json = OBJECT_MAPPER.readTree(iter.next().toJson());
-        JsonNode tagsNode = json.get("tags");
-        assertEquals(4, tagsNode.size()); // Original 3 + 1 new unique
-        Set<String> tags = new HashSet<>();
-        tagsNode.forEach(n -> tags.add(n.asText()));
-        assertTrue(tags.contains("uniqueTag"));
+        assertEquals(
+            25, OBJECT_MAPPER.readTree(iter.next().toJson()).get("price").asInt()); // 20 + 5
       }
-
       try (CloseableIterator<Document> iter = flatCollection.find(queryById("6"))) {
         assertTrue(iter.hasNext());
-        JsonNode json = OBJECT_MAPPER.readTree(iter.next().toJson());
-        JsonNode tagsNode = json.get("tags");
-        assertEquals(2, tagsNode.size()); // grooming, essential remain
-        Set<String> tags = new HashSet<>();
-        tagsNode.forEach(n -> tags.add(n.asText()));
-        assertFalse(tags.contains("plastic"));
+        assertEquals(
+            10,
+            OBJECT_MAPPER.readTree(iter.next().toJson()).get("price").asDouble(),
+            0.001); // 7.5 + 2
+      }
+
+      // Group C: verify each key got its own tag appended
+      try (CloseableIterator<Document> iter = flatCollection.find(queryById("7"))) {
+        assertTrue(iter.hasNext());
+        JsonNode tags = OBJECT_MAPPER.readTree(iter.next().toJson()).get("tags");
+        Set<String> tagSet = new HashSet<>();
+        tags.forEach(n -> tagSet.add(n.asText()));
+        assertTrue(tagSet.contains("newTag7"));
+        assertFalse(tagSet.contains("newTag8")); // key "8"'s tag must not leak into key "7"
+      }
+      try (CloseableIterator<Document> iter = flatCollection.find(queryById("8"))) {
+        assertTrue(iter.hasNext());
+        JsonNode tags = OBJECT_MAPPER.readTree(iter.next().toJson()).get("tags");
+        Set<String> tagSet = new HashSet<>();
+        tags.forEach(n -> tagSet.add(n.asText()));
+        assertTrue(tagSet.contains("newTag8"));
+        assertFalse(tagSet.contains("newTag7")); // key "7"'s tag must not leak into key "8"
       }
     }
 
